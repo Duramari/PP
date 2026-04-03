@@ -12,8 +12,8 @@ import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { Repository } from 'typeorm';
-import { InjectRedis } from '@nestjs-modules/ioredis';
-import { Redis } from 'ioredis';
+// import { InjectRedis } from '@nestjs-modules/ioredis';
+// import { Redis } from 'ioredis';
 import * as bcrypt from 'bcrypt';
 import { v4 as uuidv4 } from 'uuid';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiProperty } from '@nestjs/swagger';
@@ -189,12 +189,53 @@ const OTP_TTL_SECONDS       = 60 * 10;              // 10 min
 const LOGIN_LOCKOUT_ATTEMPTS = 5;
 const LOGIN_LOCKOUT_TTL     = 900;                  // 15 min
 
+// Simple in-memory mock for Redis when not available
+class MockRedis {
+  private store = new Map<string, { value: string; expires: number }>();
+
+  async get(key: string): Promise<string | null> {
+    const item = this.store.get(key);
+    if (!item) return null;
+    if (Date.now() > item.expires) {
+      this.store.delete(key);
+      return null;
+    }
+    return item.value;
+  }
+
+  async setex(key: string, seconds: number, value: string): Promise<void> {
+    this.store.set(key, { value, expires: Date.now() + seconds * 1000 });
+  }
+
+  async del(key: string): Promise<void> {
+    this.store.delete(key);
+  }
+
+  multi(): any {
+    const operations: any[] = [];
+    const self = this;
+    return {
+      incr: (key: string) => { operations.push(['incr', key]); return this; },
+      expire: (key: string, seconds: number) => { operations.push(['expire', key, seconds]); return this; },
+      exec: async () => {
+        for (const op of operations) {
+          if (op[0] === 'incr') {
+            const current = parseInt(await self.get(op[1]) ?? '0');
+            await self.setex(op[1], op[2] || 900, (current + 1).toString());
+          }
+        }
+      }
+    };
+  }
+}
+
 @Injectable()
 export class AuthService {
+  private redis = new MockRedis();
+
   constructor(
     @InjectRepository(User) private userRepo: Repository<User>,
     private jwtService: JwtService,
-    @InjectRedis() private redis: Redis,
   ) {}
 
   // ── Register ────────────────────────────────────────────────
